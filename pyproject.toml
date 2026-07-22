@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fm-graph"
+version = "0.1.0"
+description = "Ingest FileMaker DDR and Save-a-Copy-as-XML exports into a Neo4j property graph for Cypher-based schema and logic analysis."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Steve Allen" }]
+requires-python = ">=3.9"
+keywords = ["filemaker", "ddr", "neo4j", "graph", "static-analysis", "cypher"]
+classifiers = [
+	"License :: OSI Approved :: MIT License",
+	"Programming Language :: Python :: 3",
+	"Topic :: Software Development :: Documentation",
+	"Topic :: Database",
+]
+# Core parsing + Cypher emission use only the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# Direct-to-database loading via the Bolt driver. Without this, the tool still
+# emits a runnable .cypher file that `cypher-shell` can load with zero deps.
+driver = ["neo4j>=5.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+fm-graph = "fmgraph.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/steveAllen0112/fm-graph"
+
+[tool.setuptools]
+packages = ["fmgraph"]

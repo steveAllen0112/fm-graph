@@ -1,0 +1,43 @@
+# ---- FileMaker exports / client data: NEVER commit ----
+# This repo is the TOOL. Real DDR/SACAX exports and any client data stay out.
+*.xml
+*.fmp12
+*.fmpsl
+/data/
+/exports/
+*.ddr
+
+# Generated load artifacts
+*.cypher
+!queries/*.cypher
+!constraints.cypher
+/out/
+/build-graph/
+
+# Secrets / connection config
+.env
+*.secret
+neo4j.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Allow the tiny synthetic test fixtures (they are NOT real exports)
+!tests/fixtures/*.xml
+!examples/*.xml
