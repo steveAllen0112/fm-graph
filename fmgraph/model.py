@@ -15,6 +15,25 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Dict, Iterable, List, Optional
 
 
+# Props whose per-snapshot values are worth keeping as history. On a
+# snapshot-tagged ingest the loader copies whichever of these a node has onto
+# that node's PRESENT_IN edge, so the node still holds its latest values while
+# each snapshot's PRESENT_IN edge preserves what they were then. This is how
+# attribute drift (a calc changing, a field being renamed, a relationship's sort
+# flipping, an object's SACAX modification count/timestamp advancing) becomes
+# queryable across snapshots.
+HISTORIZED = frozenset({
+	"name", "calc", "fieldType", "dataType",
+	"leftSorted", "rightSorted", "predicate", "text",
+	"source", "uuid", "modifications", "modUser", "modAccount", "modTimestamp",
+})
+
+
+def historized(props: Dict[str, Any]) -> Dict[str, Any]:
+	"""The subset of a node's props that is tracked per snapshot."""
+	return {k: v for k, v in props.items() if k in HISTORIZED}
+
+
 # The bare "kinds" of node. The visible label is <prefix> + kind, e.g. "FMField".
 KINDS = (
 	"File",

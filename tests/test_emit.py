@@ -68,8 +68,9 @@ def test_snapshot_emits_presence_and_membership():
 	# snapshot node
 	assert "SET snap:FMSnapshot" in s
 	assert "SNAP|2026-07-22" in s
-	# nodes gain a PRESENT_IN edge + first/last seen
-	assert "MERGE (n)-[:PRESENT_IN]->(snap)" in s
+	# nodes gain a PRESENT_IN edge (carrying historized props) + first/last seen
+	assert "MERGE (n)-[pi:PRESENT_IN]->(snap)" in s
+	assert "SET pi += row.hist" in s
 	assert "n.firstSeen = coalesce(n.firstSeen," in s
 	# relationships accumulate the snapshot id idempotently
 	assert "rel.snapshots = CASE WHEN '2026-07-22' IN coalesce(rel.snapshots, [])" in s

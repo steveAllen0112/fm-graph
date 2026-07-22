@@ -14,9 +14,43 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from typing import BinaryIO, Optional
 
 from .model import GraphBatch, Schema
+
+
+# A bare '&' that is not the start of a valid entity. FileMaker exports embed
+# raw user data (grower names like "Brian & Bridget Riddle") as element text
+# without escaping, which is not well-formed XML. We escape those -- but only
+# OUTSIDE CDATA, because calc bodies live in CDATA and FileMaker uses '&' as the
+# string-concatenation operator there; escaping those would corrupt the calc.
+_BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+
+# XML 1.0 forbids these control characters ANYWHERE, even inside CDATA. Stray
+# ones (e.g. a vertical tab pasted into a grower name) turn up in FileMaker data
+# and make expat reject the whole file; they are noise, so we drop them.
+_ILLEGAL_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _sanitize_xml(text: str) -> str:
+	text = _ILLEGAL_CTRL.sub("", text)
+	out = []
+	i = 0
+	while True:
+		start = text.find("<![CDATA[", i)
+		if start == -1:
+			out.append(_BARE_AMP.sub("&amp;", text[i:]))
+			break
+		out.append(_BARE_AMP.sub("&amp;", text[i:start]))
+		end = text.find("]]>", start)
+		if end == -1:            # unterminated CDATA: leave the remainder as-is
+			out.append(text[start:])
+			break
+		end += 3
+		out.append(text[start:end])   # CDATA verbatim
+		i = end
+	return "".join(out)
 
 
 # ------------------------------------------------------------------
@@ -35,22 +69,22 @@ def detect_encoding(path: str) -> str:
 
 
 def open_utf8(path: str) -> BinaryIO:
-	"""Return a binary stream of UTF-8 bytes that ElementTree can parse,
-	transcoding UTF-16/32 on the fly and dropping the original XML declaration
-	(whose stated encoding would otherwise contradict the transcoded bytes)."""
+	"""Return a binary stream of well-formed UTF-8 that ElementTree can parse:
+	transcode from the detected encoding, drop a BOM and the original XML
+	declaration (whose stated encoding would otherwise contradict the transcoded
+	bytes), and escape bare ampersands outside CDATA (FileMaker leaves raw '&' in
+	exported data). The whole file is read into memory -- fine for DDR/SACAX
+	sizes and the price of sanitizing."""
 	enc = detect_encoding(path)
-	if enc in ("utf-8", "utf-8-sig"):
-		# expat handles a UTF-8 BOM and the declaration itself.
-		return open(path, "rb")
-
-	# Transcode. Read as text in the detected encoding, strip a leading XML
-	# declaration, and hand back UTF-8 bytes.
 	with io.open(path, "r", encoding=enc) as f:
 		text = f.read()
+	if text and text[0] == "﻿":
+		text = text[1:]  # stray BOM as a character (utf-16-le keeps it)
 	if text.startswith("<?xml"):
 		end = text.find("?>")
 		if end != -1:
 			text = text[end + 2 :].lstrip("\r\n")
+	text = _sanitize_xml(text)
 	return io.BytesIO(text.encode("utf-8"))
 
 

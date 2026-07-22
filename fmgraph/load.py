@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
-from .model import GraphBatch, Node, Rel, Schema, Snapshot
+from .model import GraphBatch, Node, Rel, Schema, Snapshot, historized
 
 
 BATCH = 1000
@@ -127,10 +127,11 @@ class CypherEmitter:
 			specific = self.schema.label(kind)
 			out.write(f"// --- {specific} ({len(nodes)}) ---\n")
 			for chunk in _chunks(nodes, BATCH):
-				rows = ", ".join(
-					_map_lit({"key": n.key, "props": n.props}) for n in chunk
-				)
 				if snapshot is not None:
+					rows = ", ".join(
+						_map_lit({"key": n.key, "props": n.props,
+								  "hist": historized(n.props)}) for n in chunk
+					)
 					out.write(
 						f"MATCH (snap:{snap_label} {{key: {sid_lit}}})\n"
 						f"UNWIND [{rows}] AS row\n"
@@ -138,9 +139,13 @@ class CypherEmitter:
 						f"SET n:{specific}, n += row.props, "
 						f"n.lastSeen = {_lit(snapshot.seq)}, "
 						f"n.firstSeen = coalesce(n.firstSeen, {_lit(snapshot.seq)})\n"
-						f"MERGE (n)-[:PRESENT_IN]->(snap);\n"
+						f"MERGE (n)-[pi:PRESENT_IN]->(snap)\n"
+						f"SET pi += row.hist;\n"
 					)
 				else:
+					rows = ", ".join(
+						_map_lit({"key": n.key, "props": n.props}) for n in chunk
+					)
 					out.write(
 						f"UNWIND [{rows}] AS row\n"
 						f"MERGE (n:{root} {{key: row.key}})\n"
@@ -239,7 +244,8 @@ class BoltLoader:
 						f"MERGE (n:{root} {{key: row.key}}) "
 						f"SET n:{specific}, n += row.props, "
 						f"n.lastSeen = $seq, n.firstSeen = coalesce(n.firstSeen, $seq) "
-						f"MERGE (n)-[:PRESENT_IN]->(snap)"
+						f"MERGE (n)-[pi:PRESENT_IN]->(snap) "
+						f"SET pi += row.hist"
 					)
 				else:
 					q = (
@@ -248,7 +254,11 @@ class BoltLoader:
 						f"SET n:{specific}, n += row.props"
 					)
 				for chunk in _chunks(nodes, BATCH):
-					rows = [{"key": n.key, "props": n.props} for n in chunk]
+					if snapshot is not None:
+						rows = [{"key": n.key, "props": n.props,
+								 "hist": historized(n.props)} for n in chunk]
+					else:
+						rows = [{"key": n.key, "props": n.props} for n in chunk]
 					session.run(q, rows=rows,
 								snapkey=(snapshot.key() if snapshot else None),
 								seq=(snapshot.seq if snapshot else None))
