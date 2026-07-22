@@ -2,7 +2,7 @@
 
 import io
 
-from fmgraph.model import Schema, GraphBatch, Node, Rel
+from fmgraph.model import Schema, GraphBatch, Node, Rel, Snapshot
 from fmgraph.load import CypherEmitter, wipe_statement
 
 
@@ -56,3 +56,29 @@ def test_wipe_targets_only_prefix():
 	sc = Schema(prefix="FM")
 	assert "(n:FM)" in wipe_statement(sc)
 	assert "IN TRANSACTIONS" in wipe_statement(sc)
+
+
+def test_snapshot_emits_presence_and_membership():
+	sc, b, _, _ = _sample_batch()
+	snap = Snapshot(id="2026-07-22", seq="2026-07-22", exportDate="2026-07-22",
+					label="Initial", files=["25 Inventory"])
+	out = io.StringIO()
+	CypherEmitter(sc).write(b, out, snapshot=snap)
+	s = out.getvalue()
+	# snapshot node
+	assert "SET snap:FMSnapshot" in s
+	assert "SNAP|2026-07-22" in s
+	# nodes gain a PRESENT_IN edge + first/last seen
+	assert "MERGE (n)-[:PRESENT_IN]->(snap)" in s
+	assert "n.firstSeen = coalesce(n.firstSeen," in s
+	# relationships accumulate the snapshot id idempotently
+	assert "rel.snapshots = CASE WHEN '2026-07-22' IN coalesce(rel.snapshots, [])" in s
+
+
+def test_no_snapshot_omits_presence():
+	sc, b, _, _ = _sample_batch()
+	out = io.StringIO()
+	CypherEmitter(sc).write(b, out)  # no snapshot
+	s = out.getvalue()
+	assert "PRESENT_IN" not in s
+	assert "FMSnapshot" not in s

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
-from .model import GraphBatch, Node, Rel, Schema
+from .model import GraphBatch, Node, Rel, Schema, Snapshot
 
 
 BATCH = 1000
@@ -92,11 +92,17 @@ def _group_rels(batch: GraphBatch) -> Dict[str, List[Rel]]:
 # --------------------------------------------------------------------------
 # Emit path
 # --------------------------------------------------------------------------
+def _snapshot_props(snap: Snapshot) -> Dict[str, Any]:
+	return {"key": snap.key(), "id": snap.id, "seq": snap.seq,
+			"exportDate": snap.exportDate, "label": snap.label, "files": snap.files}
+
+
 class CypherEmitter:
 	def __init__(self, schema: Schema):
 		self.schema = schema
 
-	def write(self, batch: GraphBatch, out: TextIO, with_constraints: bool = True) -> None:
+	def write(self, batch: GraphBatch, out: TextIO, with_constraints: bool = True,
+			  snapshot: Optional[Snapshot] = None) -> None:
 		root = self.schema.root_label()
 		out.write(f"// fm-graph load script — root label :{root}\n")
 		out.write("// Generated; safe to re-run (all MERGE, idempotent).\n\n")
@@ -106,6 +112,16 @@ class CypherEmitter:
 				out.write(c + "\n")
 			out.write("\n")
 
+		# Snapshot node (once), if this ingest is snapshot-tagged.
+		snap_label = self.schema.label("Snapshot")
+		sid_lit = ""
+		if snapshot is not None:
+			sid_lit = _lit(snapshot.key())
+			out.write(
+				f"MERGE (snap:{root} {{key: {sid_lit}}})\n"
+				f"SET snap:{snap_label}, snap += {_map_lit(_snapshot_props(snapshot))};\n\n"
+			)
+
 		# Nodes, one statement-group per specific label.
 		for kind, nodes in _group_nodes(batch).items():
 			specific = self.schema.label(kind)
@@ -114,11 +130,22 @@ class CypherEmitter:
 				rows = ", ".join(
 					_map_lit({"key": n.key, "props": n.props}) for n in chunk
 				)
-				out.write(
-					f"UNWIND [{rows}] AS row\n"
-					f"MERGE (n:{root} {{key: row.key}})\n"
-					f"SET n:{specific}, n += row.props;\n"
-				)
+				if snapshot is not None:
+					out.write(
+						f"MATCH (snap:{snap_label} {{key: {sid_lit}}})\n"
+						f"UNWIND [{rows}] AS row\n"
+						f"MERGE (n:{root} {{key: row.key}})\n"
+						f"SET n:{specific}, n += row.props, "
+						f"n.lastSeen = {_lit(snapshot.seq)}, "
+						f"n.firstSeen = coalesce(n.firstSeen, {_lit(snapshot.seq)})\n"
+						f"MERGE (n)-[:PRESENT_IN]->(snap);\n"
+					)
+				else:
+					out.write(
+						f"UNWIND [{rows}] AS row\n"
+						f"MERGE (n:{root} {{key: row.key}})\n"
+						f"SET n:{specific}, n += row.props;\n"
+					)
 			out.write("\n")
 
 		# Relationships, one statement-group per type.
@@ -129,12 +156,21 @@ class CypherEmitter:
 					_map_lit({"s": r.start, "e": r.end, "props": r.props})
 					for r in chunk
 				)
+				snap_set = ""
+				if snapshot is not None:
+					s = _lit(snapshot.id)
+					snap_set = (
+						f", rel.snapshots = CASE WHEN {s} IN coalesce(rel.snapshots, []) "
+						f"THEN rel.snapshots ELSE coalesce(rel.snapshots, []) + {s} END, "
+						f"rel.lastSnapshot = {_lit(snapshot.seq)}, "
+						f"rel.firstSnapshot = coalesce(rel.firstSnapshot, {_lit(snapshot.seq)})"
+					)
 				out.write(
 					f"UNWIND [{rows}] AS row\n"
 					f"MATCH (a:{root} {{key: row.s}})\n"
 					f"MATCH (b:{root} {{key: row.e}})\n"
 					f"MERGE (a)-[rel:{rtype}]->(b)\n"
-					f"SET rel += row.props;\n"
+					f"SET rel += row.props{snap_set};\n"
 				)
 			out.write("\n")
 
@@ -179,8 +215,9 @@ class BoltLoader:
 		session.run(query, **params)
 
 	def apply(self, batch: GraphBatch, with_constraints: bool = True,
-			  wipe: bool = False) -> None:
+			  wipe: bool = False, snapshot: Optional[Snapshot] = None) -> None:
 		root = self.schema.root_label()
+		snap_label = self.schema.label("Snapshot")
 		kwargs = {"database": self.database} if self.database else {}
 		with self._driver.session(**kwargs) as session:
 			if with_constraints:
@@ -188,26 +225,52 @@ class BoltLoader:
 					session.run(c.rstrip(";"))
 			if wipe:
 				session.run(wipe_statement(self.schema).rstrip(";"))
+			if snapshot is not None:
+				session.run(
+					f"MERGE (snap:{root} {{key: $key}}) SET snap:{snap_label}, snap += $props",
+					key=snapshot.key(), props=_snapshot_props(snapshot))
 
 			for kind, nodes in _group_nodes(batch).items():
 				specific = self.schema.label(kind)
-				q = (
-					f"UNWIND $rows AS row "
-					f"MERGE (n:{root} {{key: row.key}}) "
-					f"SET n:{specific}, n += row.props"
-				)
+				if snapshot is not None:
+					q = (
+						f"MATCH (snap:{snap_label} {{key: $snapkey}}) "
+						f"UNWIND $rows AS row "
+						f"MERGE (n:{root} {{key: row.key}}) "
+						f"SET n:{specific}, n += row.props, "
+						f"n.lastSeen = $seq, n.firstSeen = coalesce(n.firstSeen, $seq) "
+						f"MERGE (n)-[:PRESENT_IN]->(snap)"
+					)
+				else:
+					q = (
+						f"UNWIND $rows AS row "
+						f"MERGE (n:{root} {{key: row.key}}) "
+						f"SET n:{specific}, n += row.props"
+					)
 				for chunk in _chunks(nodes, BATCH):
 					rows = [{"key": n.key, "props": n.props} for n in chunk]
-					session.run(q, rows=rows)
+					session.run(q, rows=rows,
+								snapkey=(snapshot.key() if snapshot else None),
+								seq=(snapshot.seq if snapshot else None))
 
 			for rtype, rels in _group_rels(batch).items():
+				snap_set = ""
+				if snapshot is not None:
+					snap_set = (
+						", rel.snapshots = CASE WHEN $sid IN coalesce(rel.snapshots, []) "
+						"THEN rel.snapshots ELSE coalesce(rel.snapshots, []) + $sid END, "
+						"rel.lastSnapshot = $seq, "
+						"rel.firstSnapshot = coalesce(rel.firstSnapshot, $seq)"
+					)
 				q = (
 					f"UNWIND $rows AS row "
 					f"MATCH (a:{root} {{key: row.s}}) "
 					f"MATCH (b:{root} {{key: row.e}}) "
 					f"MERGE (a)-[rel:{rtype}]->(b) "
-					f"SET rel += row.props"
+					f"SET rel += row.props{snap_set}"
 				)
 				for chunk in _chunks(rels, BATCH):
 					rows = [{"s": r.start, "e": r.end, "props": r.props} for r in chunk]
-					session.run(q, rows=rows)
+					session.run(q, rows=rows,
+								sid=(snapshot.id if snapshot else None),
+								seq=(snapshot.seq if snapshot else None))

@@ -28,6 +28,7 @@ KINDS = (
 	"ValueList",
 	"CustomFunction",
 	"ExternalSource",
+	"Snapshot",
 )
 
 
@@ -51,6 +52,26 @@ class Rel:
 	start: str  # start node key
 	end: str  # end node key
 	props: Dict[str, Any] = dc_field(default_factory=dict)
+
+
+@dataclass
+class Snapshot:
+	"""Identity of one ingest. Nodes present in it get a PRESENT_IN edge to it;
+	relationships record its id in a `snapshots` list. A node/edge missing from a
+	later snapshot (whose `files` cover that node's file) was deleted.
+
+	`seq` orders snapshots (monotonic; the CLI derives it from the export date /
+	an explicit value) so "latest" and "between X and Y" are well defined.
+	"""
+
+	id: str
+	seq: str = ""           # sortable ordering key (e.g. ISO date/time)
+	exportDate: str = ""
+	label: str = ""
+	files: Any = None       # list of file names this snapshot covered
+
+	def key(self) -> str:
+		return Schema.snapshot_key(self.id)
 
 
 class Schema:
@@ -138,6 +159,10 @@ class Schema:
 	@staticmethod
 	def externalsource_key(file: str, xs_id: str) -> str:
 		return f"{file}|X|{xs_id}"
+
+	@staticmethod
+	def snapshot_key(snap_id: str) -> str:
+		return f"SNAP|{snap_id}"
 
 	# A last-resort key for a reference that could only be resolved by name
 	# (e.g. a cross-file calc ref we can't tie to an id offline). Such nodes are

@@ -55,6 +55,28 @@ SACAX becomes new nodes tagged with their source. Every node and relationship ca
 `source` (`ddr`/`sacax`) and `exportDate` provenance, so re-ingesting a newer export
 updates in place instead of duplicating.
 
+### Snapshots — history without duplication
+
+Tag an ingest with `--snapshot ID` and it becomes a point in time:
+
+```bash
+fm-graph ingest --source ddr --snapshot 2026-07-22 *.xml --emit-cypher out.cypher
+```
+
+- A `FMSnapshot {id, seq, exportDate, files}` node is created for the ingest.
+- Every node present gets `(node)-[:PRESENT_IN]->(snapshot)`. Re-ingesting a later export
+  MERGEs the *same* nodes by key and just adds a new `PRESENT_IN` edge — **no duplication**.
+- A **deletion** is the absence of a `PRESENT_IN` edge to the newer snapshot; a node's
+  existence history is the ordered set of snapshots it belongs to (`node-history.cypher`,
+  `deleted-since.cypher`). "Deleted" is scoped to files a snapshot actually covered, so a
+  file you didn't re-ingest is never mistaken for deletions.
+- Relationships (which can't point at snapshot nodes) carry a `snapshots` list plus
+  `firstSnapshot`/`lastSnapshot`, appended idempotently.
+
+This tracks *existence* history. It does not, by itself, preserve per-snapshot *attribute*
+history (a node holds its latest calc/props); capturing attribute drift is a planned opt-in
+that moves volatile props onto the `PRESENT_IN` edge.
+
 ## Graph schema (namespaced so it coexists with anything else in the DB)
 
 Every label carries a **configurable prefix** (`--label-prefix`, default `FM`) so the

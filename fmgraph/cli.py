@@ -14,10 +14,11 @@ import argparse
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from .model import Schema
+from .model import Schema, Snapshot
 from .load import CypherEmitter, BoltLoader, wipe_statement
 from .parse import parse_files
 
@@ -47,20 +48,37 @@ def _retarget_prefix(cypher: str, prefix: str) -> str:
 
 
 # ------------------------------------------------------------------
+def _build_snapshot(args, batch) -> Optional[Snapshot]:
+	if not args.snapshot:
+		return None
+	sid = args.snapshot
+	if sid == "auto":
+		sid = args.exportdate or datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+	seq = args.snapshot_seq or args.exportdate or sid
+	files = sorted({n.props.get("name") for n in batch.nodes()
+					if n.kind == "File" and n.props.get("name")})
+	return Snapshot(id=sid, seq=seq, exportDate=(args.exportdate or ""),
+					label=(args.snapshot_label or ""), files=files)
+
+
 def cmd_ingest(args) -> int:
 	schema = Schema(prefix=args.label_prefix)
 	batch = parse_files(args.files, schema, source=args.source,
 						exportdate=args.exportdate)
+	snapshot = _build_snapshot(args, batch)
 	if args.stats:
 		for k, v in batch.stats().items():
 			print(f"{k:24} {v}", file=sys.stderr)
+		if snapshot:
+			print(f"{'snapshot':24} {snapshot.id} (seq={snapshot.seq}, "
+				  f"files={len(snapshot.files or [])})", file=sys.stderr)
 
 	if args.bolt:
 		loader = BoltLoader(schema, args.bolt, args.user, _resolve_password(args),
 							database=args.database)
 		try:
 			loader.apply(batch, with_constraints=not args.no_constraints,
-						 wipe=args.wipe)
+						 wipe=args.wipe, snapshot=snapshot)
 		finally:
 			loader.close()
 		print("loaded via Bolt", file=sys.stderr)
@@ -72,7 +90,8 @@ def cmd_ingest(args) -> int:
 	try:
 		if args.wipe:
 			out.write(wipe_statement(schema) + "\n\n")
-		emitter.write(batch, out, with_constraints=not args.no_constraints)
+		emitter.write(batch, out, with_constraints=not args.no_constraints,
+					  snapshot=snapshot)
 	finally:
 		if out is not sys.stdout:
 			out.close()
@@ -148,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
 					 help="clear the prefixed subgraph before loading")
 	ing.add_argument("--no-constraints", action="store_true")
 	ing.add_argument("--exportdate", help="stamp nodes/rels with this export date")
+	ing.add_argument("--snapshot", metavar="ID",
+					 help="tag this ingest as a snapshot: nodes get PRESENT_IN "
+						  "this snapshot (no duplication on re-ingest); use 'auto' "
+						  "to derive the id from --exportdate/now")
+	ing.add_argument("--snapshot-seq", metavar="SEQ",
+					 help="sortable ordering key for the snapshot (default: "
+						  "--exportdate or the id); defines 'latest'/'between'")
+	ing.add_argument("--snapshot-label", help="human label for the snapshot")
 	ing.add_argument("--stats", action="store_true", help="print batch counts")
 	_add_conn(ing)
 	ing.set_defaults(func=cmd_ingest)
