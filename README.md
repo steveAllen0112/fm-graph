@@ -22,9 +22,9 @@ that "who writes X / what depends on Y" becomes a graph traversal.
 
 ## Status
 
-Early. Parses the DDR into the graph; SACAX is ingested **additively** on top of the same
-nodes (see below). See `queries/` for the working query library and `CHANGELOG`/issues for
-what's landed.
+Working. Parses the DDR into the graph; SACAX is ingested **additively** on top of the same
+nodes (UUIDs + edit provenance). Snapshots give existence *and* attribute history. See
+`queries/` for the query library.
 
 ## Design
 
@@ -48,12 +48,16 @@ baked into it):
 ### DDR vs SACAX — additive, not duplicative
 
 The DDR builds the graph. The SACAX pass **enriches the same nodes** (matched on a stable
-key) rather than creating parallel ones: it adds UUIDs, precise layout geometry, and — the
-practical win — **structured Import Records field maps** (the DDR only lists imports by
-positional "Source field N", which can't be resolved offline). Anything present only in
-SACAX becomes new nodes tagged with their source. Every node and relationship carries
-`source` (`ddr`/`sacax`) and `exportDate` provenance, so re-ingesting a newer export
-updates in place instead of duplicating.
+file + object-id key) rather than creating parallel ones: it adds each object's stable
+**UUID** and **edit provenance** — the modification count, the last editor's account, and
+the last-modified timestamp. Those are the attribute-change signal (see snapshots below).
+Every node carries `source` (`ddr`/`sacax`) provenance, so re-ingesting updates in place
+instead of duplicating.
+
+FileMaker exports aren't always well-formed — bare `&` in exported grower/customer names,
+stray XML-illegal control characters pasted into data. The reader repairs these on the way
+in (illegal control chars dropped everywhere; bare `&` escaped **outside** CDATA only, so
+calc bodies — where FileMaker uses `&` for concatenation — are left intact).
 
 ### Snapshots — history without duplication
 
@@ -73,9 +77,12 @@ fm-graph ingest --source ddr --snapshot 2026-07-22 *.xml --emit-cypher out.cyphe
 - Relationships (which can't point at snapshot nodes) carry a `snapshots` list plus
   `firstSnapshot`/`lastSnapshot`, appended idempotently.
 
-This tracks *existence* history. It does not, by itself, preserve per-snapshot *attribute*
-history (a node holds its latest calc/props); capturing attribute drift is a planned opt-in
-that moves volatile props onto the `PRESENT_IN` edge.
+**Attribute history** is captured too: volatile props (a field's `calc`, a relationship's
+sort flags, a step's text, and the SACAX modification count/timestamp) are recorded on each
+`PRESENT_IN` edge. The node keeps its latest values; each snapshot's edge preserves what they
+were then — so `attribute-history.cypher` shows a calc changing across exports, and who
+changed it (from the SACAX provenance) when. Ingest the same solution's DDR+SACAX at each
+point in time and the drift is queryable.
 
 ## Graph schema (namespaced so it coexists with anything else in the DB)
 
@@ -123,16 +130,21 @@ pip install -e .            # or: pip install -e '.[driver,dev]'
 ## Usage
 
 ```bash
-# Parse a DDR export set and emit a load script (zero-dependency path):
-fm-graph ingest --source ddr --emit-cypher out.cypher  "MyFile_fmp12.xml" ...
-cat constraints.cypher out.cypher | cypher-shell -u neo4j -p "$PW"
+# Ingest a whole export set (DDR + SACAX together) as one snapshot, zero-dependency path.
+# --source auto detects each file; DDR builds the graph, SACAX enriches the same nodes.
+fm-graph ingest --source auto --snapshot 2026-07-22 \
+    --emit-cypher out.cypher  *_fmp12.xml  *.xml
+cypher-shell -u neo4j -p "$PW" -f out.cypher     # constraints are emitted inline
 
-# Layer the SACAX export on top (additive enrichment):
-fm-graph ingest --source sacax --emit-cypher enrich.cypher  "MyFile.xml" ...
-cypher-shell -u neo4j -p "$PW" < enrich.cypher
+# Re-ingest a later export as a new snapshot — same nodes MERGE by key, drift is recorded.
+fm-graph ingest --source auto --snapshot 2026-10-01 --emit-cypher next.cypher *.xml
+cypher-shell -u neo4j -p "$PW" -f next.cypher
 
-# Or load directly over Bolt (needs the [driver] extra):
-fm-graph ingest --source auto --bolt bolt://localhost:7687 -u neo4j  *.xml
+# Or load directly over Bolt (needs the [driver] extra; much faster than emit for big graphs):
+fm-graph ingest --source auto --snapshot 2026-07-22 --bolt bolt://localhost:7687 -u neo4j *.xml
+
+# Run a canned query (prints it; add --bolt to execute):
+fm-graph query attribute-history --param 'field=Buyer Current Credit Limit' --bolt bolt://localhost:7687
 ```
 
 The DDR/SACAX XML is often UTF-16; fm-graph detects and decodes it. Only nodes carrying the

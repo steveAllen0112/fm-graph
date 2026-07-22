@@ -23,7 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO
 from .model import GraphBatch, Node, Rel, Schema, Snapshot, historized
 
 
-BATCH = 1000
+BATCH = 3000
 
 
 # --------------------------------------------------------------------------
