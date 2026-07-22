@@ -39,6 +39,8 @@ def _lit(v: Any) -> str:
 		return repr(v)
 	if isinstance(v, (list, tuple)):
 		return "[" + ", ".join(_lit(x) for x in v) + "]"
+	if isinstance(v, dict):
+		return _map_lit(v)
 	s = str(v)
 	s = (
 		s.replace("\\", "\\\\")
@@ -167,6 +169,11 @@ class BoltLoader:
 
 	def close(self) -> None:
 		self._driver.close()
+
+	def query(self, cypher: str, **params) -> List[Dict[str, Any]]:
+		kwargs = {"database": self.database} if self.database else {}
+		with self._driver.session(**kwargs) as session:
+			return [dict(r) for r in session.run(cypher, **params)]
 
 	def _run(self, session, query: str, **params) -> None:
 		session.run(query, **params)
