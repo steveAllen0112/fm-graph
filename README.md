@@ -127,6 +127,17 @@ cd fm-graph
 pip install -e .            # or: pip install -e '.[driver,dev]'
 ```
 
+On an externally-managed Python (PEP 668), use a venv:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e '.[driver]'
+.venv/bin/fm-graph ingest ...
+```
+
+The parse + `--emit-cypher` path needs no dependencies at all. The `[driver]` extra adds the
+Bolt loader (`--bolt`), which is **much** faster for large graphs — a full ~10k-node
+DDR+SACAX snapshot loads in ~30s over Bolt versus minutes through `cypher-shell -f`.
+
 ## Usage
 
 ```bash
